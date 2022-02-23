@@ -1,24 +1,36 @@
 #include "radar_json.h"
-#include "coordinate_transformation.h"
+#include "tools.h"
 #include "paint_EasyX.h"
-#include "overlapping_areas.h"
 #include "NNDA.h"
-#include "ekf_interface.h"
+#include "EKF.h"
 
 #include <thread>
 #include <mutex>
 
-//雷达文件的路径
+//雷达文件路径
 std::string radar1_path = "C:\\Users\\LLW\\Desktop\\mul_radar_fus\\radar.json";
 std::string radar2_path = "C:\\Users\\LLW\\Desktop\\mul_radar_fus\\radar.json";
+//相机文件路径
+std::string camera_path = "xxxxx";
 
 mutex mtx1, mtx2;//互斥量//给线程上锁
 condition_variable cv;// 定义条件变量(用来做线程间的同步通信)
 
+//雷达有重叠区域时使用NNDA
+std::shared_ptr<TOOLS> tool = std::make_shared<TOOLS>(); 
+std::shared_ptr<NNDA> nnda = std::make_shared<NNDA>();
+
+//雷达没有重叠区域时使用EKF
+//EKF *ekf_api = new EKF();//实例化EKF指针 //用后必须删除
+//智能指针:方便资源的管理，自动释放没有指针引用的资源
+//std::shared_ptr<EKF> ekf_api(new EKF);
+std::shared_ptr<EKF> ekf_api = std::make_shared<EKF>(); //make_shared要优于使用new，make_shared可以一次将需要内存分配好
+
+//画图
+std::shared_ptr<GRAPH> graph = std::make_shared<GRAPH>();
 
 //定义共享容器，共享变量等
-vector<RadarInfo_t> radar_infos, radar_frame_infos;//定义RadarInfo_t的一个类型
-//vector<Eigen::Vector2d> radarVels, radarPoints; 
+vector<RadarInfo_t> radar_infos, radar_frame_infos;
 void Radar1Thread() {
 
 	// 获取mtx互斥锁资源
@@ -52,7 +64,7 @@ void Radar1Thread() {
 		}
 		else {
 			//cout << "时间戳不相等，帧数加一" << endl;
-			cout << "第" << frame_num << "帧内的目标个数为：" << target_num << endl;	
+			//cout << "第" << frame_num << "帧内的目标个数为：" << target_num << endl;	
 			frame_num++;
 			target_num = 1; //再次初始化 复位目标个数
 
@@ -77,7 +89,7 @@ void Radar1Thread() {
 			//std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
 	}
-	cout << "总帧数frame_num = " << frame_num - 1 << endl;//
+	//cout << "总帧数frame_num = " << frame_num - 1 << endl;//
 
 	/*
 	//使用单个目标的测试
@@ -94,8 +106,7 @@ void Radar1Thread() {
 }
 
 //定义共享容器，共享变量等
-vector<RadarInfo_t> radar2_infos, radar2_frame_infos;//定义RadarInfo_t的一个类型
-//vector<Eigen::Vector2d> radar2Vels, radar2Points;
+vector<RadarInfo_t> radar2_infos, radar2_frame_infos;
 void Radar2Thread() {
 	//mtx.lock();
 
@@ -157,11 +168,8 @@ void Radar2Thread() {
 	
 }
 
-Eigen::Vector2d radarTestPoints, radarTestVels;
 void RadarFusionThread() {
 	//mtx.lock();
-
-	//initgraph(1800, 900); //创建图形界面，参数:图形宽度，图形高度 //画图
 
 	//每处理一帧，就通知雷达线程产生一帧
 	while(1){
@@ -178,49 +186,30 @@ void RadarFusionThread() {
 			// 让Radar2Thread线程抢到锁能够去产生数据
 			cv.wait(lock2);
 		}
-
 		/*
-		cout << "radar_frame_infos.size() = " << radar_frame_infos.size() << endl; 
+		cout << "雷达1的目标个数为： " << radar_frame_infos.size() << endl; 
 		for (size_t idx = 0; idx < radar_frame_infos.size(); idx++) {
 			cout << "radar_frame_infos[idx].car_id:" << radar_frame_infos[idx].car_id << endl;
 		}
-		*/	
-
-		/*
-		cout << "radar2_frame_infos.size() = " << radar2_frame_infos.size() << endl;
+				
+		cout << "雷达2的目标个数为： " << radar2_frame_infos.size() << endl;
 		for (size_t idx = 0; idx < radar2_frame_infos.size(); idx++) {
 			cout << "radar2_frame_infos[idx].car_id:" << radar2_frame_infos[idx].car_id << endl;
 		}
-		*/
-		
-		//获取位置
-		/*ExtractPos(radar2_frame_infos, radar2Points);
-		cout << "radar2Points.size()=" << radar2Points.size() << endl;
-		for (size_t idx = 0; idx < radar2Points.size(); idx++) {
-			cout << "radar2Points:" << "(" << radar2Points[idx][0] << "," << radar2Points[idx][1] << ")" << endl;
-		}*/
-		
-		//获取速度
-		/*ExtractVel(radar2_frame_infos, radar2Vels);
-		cout << "radarVels.size()=" << radar2Vels.size() << endl;
-		for (size_t idx = 0; idx < radar2Vels.size(); idx++) {
-			cout << "radarVels:" << "(" << radar2Vels[idx][0] << "," << radar2Vels[idx][1] << ")" << endl;
-		}*/		
-		
+		*/	
+
 		vector<RadarInfo_t> radar_fusion_result;	//输出结果  //三部分
 		/*----------------------------第一种情况：雷达之间存在重叠区域-------------------------*/
-		//雷达之间重叠区域的判断
+		//雷达之间重叠区域的判断		
 		vector<RadarInfo_t> radar1OverlapOutput, radar2OverlapOutput;
 		vector<RadarInfo_t> radar1OverlapExcept, radar2OverlapExcept;
-		JudgmentOverlap(radar_frame_infos, radar2_frame_infos, radar1OverlapOutput, radar2OverlapOutput, radar1OverlapExcept, radar2OverlapExcept);
+		tool->JudgmentOverlap(radar_frame_infos, radar2_frame_infos, radar1OverlapOutput, radar2OverlapOutput, radar1OverlapExcept, radar2OverlapExcept);	
 		/*
 		cout << "该帧里满足重叠区域判断条件，radar1OverlapOutput.size() = " << radar1OverlapOutput.size() << endl;
 		cout << "该帧里雷达1不满足重叠区域判断条件，radar1OverlapExcept.size() = " << radar1OverlapExcept.size() << endl;
 		cout << "该帧里满足重叠区域判断条件，radar2OverlapOutput.size() = " << radar2OverlapOutput.size() << endl;
 		cout << "该帧里雷达2不满足重叠区域判断条件，radar2OverlapExcept.size() = " << radar2OverlapExcept.size() << endl;
 		*/
-		
-			
 		
 		if (!radar1OverlapOutput.empty() || !radar2OverlapOutput.empty()) {		
 			//假设以雷达2为公共坐标系/对雷达1的数据进行坐标转换   
@@ -234,13 +223,11 @@ void RadarFusionThread() {
 				radar1OverlapExcept[idx].position[1] = radar1OverlapExcept[idx].position[0] * (-sin(angle)) + radar1OverlapExcept[idx].position[1] * cos(angle) + b;
 				radar_fusion_result.push_back(radar1OverlapExcept[idx]);//第一部分
 			}
-			
-			
+						
 			//判断距离差<距离阈值，速度差<速度阈值，车道号相等 --> 进行凸组合加权平均的航迹融合
 			//NNDA
 			vector<RadarInfo_t> mul_radar_fusion;
-			NNDA::NNDA *temp = new NNDA::NNDA();//非静态成员函数调用先进行实例化
-			temp->Fusion(radar1OverlapOutput, radar2OverlapOutput, mul_radar_fusion);
+			nnda->Fusion(radar1OverlapOutput, radar2OverlapOutput, mul_radar_fusion);
 
 			//判断出同一辆车之后把车辆特征信息也叠加上去
 
@@ -255,48 +242,16 @@ void RadarFusionThread() {
 
 		}
 		
-		/*----------------------------第二种情况：雷达之间不存在重叠区域-------------------------*/
+		/*----------------------------第二种情况：雷达之间不存在重叠区域-------------------------*/		
 		else {
-			//EKF
-			EKF_API *ekf_api = new EKF_API(); //定义EKF的接口 指针
-			ekf_api->process(radar_frame_infos);// EKF 过程
-			
-			//cout << "radar_frame_infos.size().size() = " << radar_frame_infos.size() << endl;//目标个数
-			//获取数据信息
-			/*for (size_t idx = 0; idx < radar_frame_infos.size(); idx++) {
-				Eigen::Vector2d radarPos,radarVel;
-				radarPos[0] = radar_frame_infos[idx].position[0];
-				radarPos[1] = radar_frame_infos[idx].position[1];
-				radarTestPoints << radarPos[0],
-								radarPos[1];
-				radarVel[0] = radar_frame_infos[idx].velocity[0];
-				radarVel[1] = radar_frame_infos[idx].velocity[1];
-				radarTestVels << radarVel[0],
-								radarVel[1];
-				cout << "radar_frame_infos[idx].car_id : " << radar_frame_infos[idx].car_id << "   "
-					<< "radarPoints:" << "(" << radarTestPoints[0] << "," << radarTestPoints[1] << ")" << "   "
-					<< "radarVels:" << "(" << radarTestVels[0] << "," << radarTestVels[1] << ")" << endl;	
-			}*/
-			/*
-			std::vector<RadarInfo_t> measurementPackList;
-			for (auto &result : radarPoints) {
-				RadarInfo_t temp;
-				temp.position << result[0], result[1];// 2 x 1 向量
-				temp.timeStamp = 50; //ms//采样帧率
-				measurementPackList.push_back(temp); //转换过去的点一个一个的存入 measurementPackList 后续对这些点做 EKF
-			}
-			//ekf_api->process(measurementPackList); // EKF 过程
-			*/
+			//EKF				
+			ekf_api->Process(radar_frame_infos);// EKF 过程
 		}
-		
-		/*
+				
 		//画图
-		//system("cls");  //清空当前控制台 执行画图
-		vector<Eigen::Vector2d> testPoint;
-		ExtractPos(radar_frame_infos, testPoint);
-		radarPaint(testPoint);
-		*/
-		
+		graph->radarPaint(radar_frame_infos);
+
+		//Sleep(50);
 		radar_frame_infos.clear(); radar2_frame_infos.clear();
 
 		//通知等待在cv条件变量上的产生线程，可以开始产生数据了，然后释放锁mtx
@@ -305,12 +260,16 @@ void RadarFusionThread() {
 		//std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 	}
+	//delete(ekf_api);//手动释放EKF的内存
 	//mtx.unlock();
 
 }
 
 int main() {
-	
+
+	initgraph(1300, 700); //创建图形界面，参数:图形宽度，图形高度 //画图	
+	setbkcolor(BLACK);//设置背景填充 RGB(135, 206, 250)
+
 	thread th1(Radar1Thread);//第一个参数为函数名，第二个参数为该函数的第一个参数，如果该函数接收多个参数就依次写在后面。此时线程开始执行。
 	//cout << "主线程中显示子线程id为" << th1.get_id() << endl;
 	thread th2(Radar2Thread);	
@@ -320,7 +279,8 @@ int main() {
 	th2.join();
 	th3.join();
 	
-	
+	//system("cls");  //清空当前控制台
 	system("pause");//请按任意键继续...
 	return 0;
+	
 }
